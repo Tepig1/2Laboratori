@@ -2,10 +2,14 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const db = require("./database");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt")
 
 const app = express();
 const PORT = 3000;
-const SECRET_KEY = "1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t";
+const SECRET_KEY = "any_key";
+const adminRights = "admin"
+const userRights = "user"
+
 
 app.use(bodyParser.json());
 
@@ -16,10 +20,12 @@ app.post("/register", (req, res) => {
   if (!username || !password || !role) {
     return res.status(400).json({ message: "Username, password, and role are required" });
   }
+  const salt = bcrypt.genSaltSync(10)
+  const passwordHash = bcrypt.hashSync(password, salt)
 
   db.run(
     "INSERT INTO users (username, password, role, firstName, lastName, city) VALUES (?, ?, ?, ?, ?, ?)",
-    [username, password, role, firstName, lastName, city],
+    [username, passwordHash, role, firstName, lastName, city],
     function (err) {
       if (err) {
         console.error("Error registering user:", err.message);
@@ -36,24 +42,34 @@ app.post("/register", (req, res) => {
 // Аутентификация и генерация JWT-токена
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
-
   if (!username || !password) {
     return res.status(400).json({ message: "Username and password are required" });
   }
+  let user = undefined;
+  db.get("SELECT * FROM users WHERE username = ?", [username], function(err, row) {
+    if (err){
+        console.log(err)
+    }
+    user = {
+      username: username,
+      passwordHash: row.password,
+      role: row.role,
+    }
+    if (!bcrypt.compareSync(password, user.passwordHash)){
+      return res.sendStatus(401)
+    }
 
-  // Здесь ты должен проверить пароль пользователя в базе данных
-  // После успешной проверки генерируй JWT-токен
+    const jwtPayload = { username: user.username , role: user.role }; 
 
-  const user = { username, role: "user" }; // Пример, подставь свою логику проверки пароля
-
-  const token = jwt.sign(user, SECRET_KEY, { expiresIn: "1h" });
-  res.json({ token });
+    const token = jwt.sign(jwtPayload, SECRET_KEY, { expiresIn: "1h" });
+    res.header("auth-token", token)
+    res.sendStatus(200);
+  });  
 });
 
 // Middleware для проверки JWT-токена
 function verifyToken(req, res, next) {
   const token = req.headers.authorization
-  console.log(token)
 
   if (!token) {
     return res.status(401).json({ message: "Unauthorized" });
@@ -63,10 +79,27 @@ function verifyToken(req, res, next) {
     if (err) {
       return res.status(401).json({ message: "Invalid token" });
     }
-
     req.user = decoded;
     next();
   });
+}
+
+function checkAdminRights(req, res, next){
+  console.log(req.user)
+  if (req.user.role == adminRights){
+    next();
+  }
+  else {
+    res.sendStatus(403)
+  }
+}
+function checkUserRights(req, res, next){
+  if (req.user.role == userRights){
+    next();
+  }
+  else {
+    res.sendStatus(403)
+  }
 }
 
 // Пример защищенного маршрута с использованием middleware
@@ -75,7 +108,7 @@ app.get("/protected", verifyToken, (req, res) => {
 });
 
 // Роуты для просмотра продуктов
-app.get("/products", (req, res) => {
+app.get("/products", verifyToken, (req, res) => {
   db.all("SELECT * FROM products", (err, products) => {
     if (err) {
       console.error("Error getting products:", err.message);
@@ -87,7 +120,7 @@ app.get("/products", (req, res) => {
   });
 });
 
-app.get("/products/:id", (req, res) => {
+app.get("/products/:id", verifyToken, (req, res) => {
   const productId = parseInt(req.params.id);
   db.get("SELECT * FROM products WHERE id = ?", [productId], (err, product) => {
     if (err) {
@@ -105,7 +138,7 @@ app.get("/products/:id", (req, res) => {
 });
 
 // Роуты для управления продуктами
-app.post("/products", (req, res) => {
+app.post("/products", verifyToken, checkAdminRights, (req, res) => {
   const { name, price } = req.body;
 
   if (!name || !price) {
@@ -124,7 +157,7 @@ app.post("/products", (req, res) => {
   });
 });
 
-app.put("/products/:id", (req, res) => {
+app.put("/products/:id", verifyToken, checkAdminRights, (req, res) => {
   const productId = parseInt(req.params.id);
   const { name, price } = req.body;
 
@@ -147,7 +180,7 @@ app.put("/products/:id", (req, res) => {
   });
 });
 
-app.delete("/products/:id", (req, res) => {
+app.delete("/products/:id", verifyToken,  checkAdminRights, (req, res) => {
   const productId = parseInt(req.params.id);
 
   db.run("DELETE FROM products WHERE id = ?", [productId], function (err) {
@@ -173,10 +206,12 @@ app.get("/users", (req, res) => {
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
-
     res.json(users);
   });
 });
+
+
+
 
 // Обработка завершения работы приложения
 process.on("exit", () => {
